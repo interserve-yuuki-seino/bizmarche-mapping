@@ -1,0 +1,14 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100svh;
+}
+
+my-element {
+  display: block;
+  min-height: 100svh;
+}
