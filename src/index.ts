@@ -1,5 +1,5 @@
 // 配布用エントリ: import すると custom element が登録される
-import './my-element'
+import './bizmarche-converter-mapping'
 
-export * from './my-element'
+export * from './bizmarche-converter-mapping'
 
