@@ -6,6 +6,7 @@ import { buildEntitySchemaPart } from './serialize-entity'
 /** viewFields から ViewSchema 部分を組み立て */
 export function buildViewSchemaPart(
   viewFields: ViewFieldState[],
+  rowExpands: string[] = [],
 ): IndexAppViewSchema {
   const fields = viewFields
     .map((vf) => {
@@ -18,7 +19,11 @@ export function buildViewSchemaPart(
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
 
-  return fields.length > 0 ? { fields } : {}
+  const expands = rowExpands.map((x) => x.trim()).filter(Boolean)
+  const out: IndexAppViewSchema = {}
+  if (fields.length > 0) out.fields = fields
+  if (expands.length > 0) out.rowExpands = expands
+  return out
 }
 
 /** コンバーターに渡す IndexAppQuery 全体を組み立て */
@@ -26,6 +31,7 @@ export function buildIndexAppQuery(params: {
   targetSearchPath: string
   entitySchemaState: EntitySchemaState
   viewFields: ViewFieldState[]
+  rowExpands?: string[]
 }): IndexAppQuery {
   const query: IndexAppQuery = {}
 
@@ -39,7 +45,10 @@ export function buildIndexAppQuery(params: {
     query.entitySchema = entitySchema
   }
 
-  const viewSchema = buildViewSchemaPart(params.viewFields)
+  const viewSchema = buildViewSchemaPart(
+    params.viewFields,
+    params.rowExpands ?? [],
+  )
   if (Object.keys(viewSchema).length > 0) {
     query.viewSchema = viewSchema
   }
@@ -52,6 +61,7 @@ export function buildQueryJson(params: {
   targetSearchPath: string
   entitySchemaState: EntitySchemaState
   viewFields: ViewFieldState[]
+  rowExpands?: string[]
 }): string {
   return JSON.stringify(buildIndexAppQuery(params), null, 2)
 }

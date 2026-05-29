@@ -11,7 +11,8 @@ import type {
 import { EntityFieldNode, ViewFieldNode, type Schemes } from './nodes'
 import {
   asViewFieldControl,
-  type ViewFieldControlPayload,
+  isReteViewFieldControl,
+  type ReteViewFieldControl,
 } from './controls/view-field-control'
 
 import './controls/view-field-control'
@@ -31,7 +32,10 @@ export type MappingEditorCallbacks = {
 
 export type MappingEditorHandle = {
   destroy: () => void
-  addEntityFieldNode: (fieldName: string) => Promise<void>
+  addEntityFieldNode: (
+    fieldName: string,
+    displayName?: string,
+  ) => Promise<void>
   addViewFieldNode: (state: ViewFieldState) => Promise<void>
   removeViewFieldNode: (viewFieldId: string) => Promise<void>
   /** EntityField(value) → ViewField(in) を接続（既存の接続は置き換え） */
@@ -40,6 +44,9 @@ export type MappingEditorHandle = {
     viewFieldId: string,
   ) => Promise<void>
   syncViewFields: (viewFields: ViewFieldState[]) => void
+  /** 初回描画で control が載らない場合の再描画 */
+  refreshViewFieldNode: (viewFieldId: string) => Promise<void>
+  refreshAllViewFieldNodes: () => Promise<void>
 }
 
 export async function createMappingEditor(
@@ -55,15 +62,11 @@ export async function createMappingEditor(
     Presets.classic.setup({
       customize: {
         control(context) {
-          const payload = context.payload
-          if (
-            payload &&
-            typeof payload === 'object' &&
-            'kind' in payload &&
-            (payload as { kind: string }).kind === 'viewFieldControl'
-          ) {
-            return () => {
-              const p = payload as ViewFieldControlPayload & ClassicPreset.Control
+          // payload は描画のたびに参照する（初回だけ未設定だと () => null が固定される）
+          return () => {
+            const payload = context.payload
+            if (isReteViewFieldControl(payload)) {
+              const p = payload
               return html`<bm-view-field-control
                 .viewFieldId=${p.viewFieldId}
                 .fieldName=${p.fieldName}
@@ -73,24 +76,24 @@ export async function createMappingEditor(
                 .syncRevision=${p.syncRevision ?? 0}
               ></bm-view-field-control>`
             }
+            if (payload instanceof ClassicPreset.InputControl) {
+              const ctrl = payload
+              return html`
+                <input
+                  class="rete-input"
+                  type=${ctrl.type}
+                  style=${RETE_TEXT_INPUT_STYLE}
+                  .value=${String(ctrl.value ?? '')}
+                  ?readonly=${ctrl.readonly}
+                  @input=${(e: Event) => {
+                    ctrl.setValue((e.target as HTMLInputElement).value)
+                  }}
+                  @pointerdown=${(e: Event) => e.stopPropagation()}
+                />
+              `
+            }
+            return null
           }
-          if (payload instanceof ClassicPreset.InputControl) {
-            const ctrl = payload
-            return () => html`
-              <input
-                class="rete-input"
-                type=${ctrl.type}
-                style=${RETE_TEXT_INPUT_STYLE}
-                .value=${String(ctrl.value ?? '')}
-                ?readonly=${ctrl.readonly}
-                @input=${(e: Event) => {
-                  ctrl.setValue((e.target as HTMLInputElement).value)
-                }}
-                @pointerdown=${(e: Event) => e.stopPropagation()}
-              />
-            `
-          }
-          return () => null
         },
       },
     }),
@@ -149,8 +152,8 @@ export async function createMappingEditor(
     )?.[0]
     if (fromMap) return fromMap
 
-    const control = node.controls?.viewField as ViewFieldControlPayload | undefined
-    if (control?.viewFieldId) return control.viewFieldId
+    const control = node.controls?.viewField
+    if (isReteViewFieldControl(control)) return control.viewFieldId
 
     const data = (node as ViewFieldNode).data
     return data?.viewFieldId ?? null
@@ -197,9 +200,7 @@ export async function createMappingEditor(
     node: ClassicPreset.Node,
     vf: ViewFieldState,
   ) => {
-    const existing = node.controls?.viewField as
-      | (ViewFieldControlPayload & ClassicPreset.Control)
-      | undefined
+    const existing = node.controls?.viewField as ReteViewFieldControl | undefined
     const onPatch =
       existing?.onPatch ??
       ((patch: ViewFieldPatch) => callbacks.onViewFieldPatch?.(patch))
@@ -208,7 +209,6 @@ export async function createMappingEditor(
     node.addControl(
       'viewField',
       asViewFieldControl({
-        kind: 'viewFieldControl',
         viewFieldId: vf.id,
         fieldName: vf.fieldName,
         formula: vf.formula,
@@ -227,14 +227,13 @@ export async function createMappingEditor(
     )
 
     for (const [viewFieldId, node] of viewNodeById) {
-      const existing = node.controls?.viewField as
-        | ViewFieldControlPayload
-        | undefined
+      const existing = node.controls?.viewField
+      const ctrl = isReteViewFieldControl(existing) ? existing : undefined
       const from = byTo.get(viewFieldId) ?? ''
 
-      let fieldName = existing?.fieldName ?? ''
-      let formula = existing?.formula ?? ''
-      let overrideFieldName = !!existing?.overrideFieldName
+      let fieldName = ctrl?.fieldName ?? ''
+      let formula = ctrl?.formula ?? ''
+      let overrideFieldName = !!ctrl?.overrideFieldName
 
       if (from) {
         fieldName = from
@@ -337,9 +336,9 @@ export async function createMappingEditor(
   const syncViewFieldControl = (vf: ViewFieldState) => {
     const node = viewNodeById.get(vf.id)
     if (!node) return
-    const existing = node.controls?.viewField as ViewFieldControlPayload | undefined
+    const existing = node.controls?.viewField
     if (
-      existing?.kind === 'viewFieldControl' &&
+      isReteViewFieldControl(existing) &&
       existing.fieldName === vf.fieldName &&
       existing.formula === vf.formula &&
       existing.overrideFieldName === vf.overrideFieldName
@@ -347,6 +346,18 @@ export async function createMappingEditor(
       return
     }
     replaceViewFieldControl(node, vf)
+  }
+
+  const refreshViewFieldNode = async (viewFieldId: string) => {
+    const node = viewNodeById.get(viewFieldId)
+    if (!node) return
+    await area.update('node', String(node.id))
+  }
+
+  const refreshAllViewFieldNodes = async () => {
+    for (const id of viewNodeById.keys()) {
+      await refreshViewFieldNode(id)
+    }
   }
 
   const handle: MappingEditorHandle = {
@@ -357,9 +368,9 @@ export async function createMappingEditor(
       container.replaceChildren()
     },
 
-    async addEntityFieldNode(fieldName: string) {
+    async addEntityFieldNode(fieldName: string, displayName?: string) {
       if (entityFieldNodeByName.has(fieldName)) return
-      const node = new EntityFieldNode(fieldName)
+      const node = new EntityFieldNode(fieldName, displayName)
       await editor.addNode(node)
       const pos = nextEntityPlacement()
       await area.translate(node.id, pos)
@@ -376,7 +387,6 @@ export async function createMappingEditor(
 
       const node = new ViewFieldNode(state.id)
       const control = asViewFieldControl({
-        kind: 'viewFieldControl',
         viewFieldId: state.id,
         fieldName: state.fieldName,
         formula: state.formula,
@@ -391,6 +401,8 @@ export async function createMappingEditor(
       await area.translate(node.id, pos)
       viewFieldPosById.set(state.id, pos)
       viewNodeById.set(state.id, node)
+      // 初回 addNode 直後は lit control が DOM に載らないことがある
+      await refreshViewFieldNode(state.id)
     },
 
     async connectEntityFieldToView(entityFieldName: string, viewFieldId: string) {
@@ -439,6 +451,10 @@ export async function createMappingEditor(
         syncViewFieldControl(vf)
       }
     },
+
+    refreshViewFieldNode,
+
+    refreshAllViewFieldNodes,
   }
 
   // ViewField は親（bizmarche-converter-mapping）の viewFields から addViewFieldNode で追加する

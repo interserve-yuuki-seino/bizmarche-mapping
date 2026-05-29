@@ -1,6 +1,9 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import type { EntityFieldRow } from '../entity-schema/types'
+import {
+  entityFieldDisplayLabel,
+  type EntityFieldRow,
+} from '../entity-schema/types'
 
 @customElement('entity-field-palette')
 export class EntityFieldPalette extends LitElement {
@@ -49,9 +52,9 @@ export class EntityFieldPalette extends LitElement {
                           }),
                         )}
                     >
-                      <span class="name">${f.fieldName}</span>
-                      ${f.displayName
-                        ? html`<span class="sub">${f.displayName}</span>`
+                      <span class="name">${entityFieldDisplayLabel(f)}</span>
+                      ${f.displayName?.trim()
+                        ? html`<span class="sub">${f.fieldName}</span>`
                         : null}
                       ${f.length != null
                         ? html`<span class="meta">len:${f.length}</span>`

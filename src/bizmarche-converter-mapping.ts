@@ -18,7 +18,13 @@ import {
   extractEntityFields,
   parseEntitySchemaJson,
 } from './entity-schema/state'
-import type { EntityFieldRow, EntitySchemaState } from './entity-schema/types'
+import {
+  entityFieldDisplayLabel,
+  findEntityFieldByName,
+  resolveEntityFieldName,
+  type EntityFieldRow,
+  type EntitySchemaState,
+} from './entity-schema/types'
 import { postConverterQuery } from './api/converter'
 import { buildIndexAppQuery } from './query/build-query'
 import {
@@ -28,6 +34,11 @@ import {
   type ViewFieldPatch,
   type ViewFieldState,
 } from './mapping/view-field-state'
+import {
+  createRowExpandEntry,
+  normalizeRowExpands,
+  type RowExpandEntry,
+} from './mapping/row-expands-state'
 import './ui/entity-field-palette'
 
 @customElement('bizmarche-converter-mapping')
@@ -45,6 +56,8 @@ export class BizmarcheConverterMapping extends LitElement {
   @state() private selectedCatalogId = ''
   @state() private schemaPath = ''
   @state() private entityJsonText = ''
+  /** EntitySchema JSON パネルの展開状態 */
+  @state() private entityJsonExpanded = false
   @state() private entityFields: EntityFieldRow[] = []
   @state() private entitySchemaState: EntitySchemaState =
     createEmptyEntitySchemaState()
@@ -55,7 +68,8 @@ export class BizmarcheConverterMapping extends LitElement {
   @state() private schemaError: string | null = null
 
   @state() private targetSearchPath = ''
-  @state() private viewFields: ViewFieldState[] = [createViewFieldState()]
+  @state() private viewFields: ViewFieldState[] = []
+  @state() private rowExpands: RowExpandEntry[] = []
   @state() private connections: ViewFieldConnection[] = []
   @state() private canvasEntityFieldNames: string[] = []
   @state() private queryJson = '{}'
@@ -67,6 +81,39 @@ export class BizmarcheConverterMapping extends LitElement {
   private get paletteEntityFields(): EntityFieldRow[] {
     const onCanvas = new Set(this.canvasEntityFieldNames)
     return this.entityFields.filter((f) => !onCanvas.has(f.fieldName))
+  }
+
+  /** rowExpands 入力の datalist 候補（Entity フィールド） */
+  private get rowExpandLookupFields(): EntityFieldRow[] {
+    const byName = new Map<string, EntityFieldRow>()
+    for (const f of this.entityFields) {
+      const name = f.fieldName.trim()
+      if (name) byName.set(name, f)
+    }
+    for (const name of this.canvasEntityFieldNames) {
+      const trimmed = name.trim()
+      if (trimmed && !byName.has(trimmed)) {
+        byName.set(trimmed, { fieldName: trimmed })
+      }
+    }
+    return [...byName.values()].sort((a, b) =>
+      entityFieldDisplayLabel(a).localeCompare(
+        entityFieldDisplayLabel(b),
+        'ja',
+      ),
+    )
+  }
+
+  /** rowExpands 入力欄の表示値（displayName があれば優先） */
+  private rowExpandDisplayValue(fieldName: string): string {
+    const field = findEntityFieldByName(fieldName, this.rowExpandLookupFields)
+    return entityFieldDisplayLabel(field ?? { fieldName })
+  }
+
+  /** displayName 表示時に fieldName をサブ表示するか */
+  private rowExpandShowsFieldNameSub(fieldName: string): boolean {
+    const field = findEntityFieldByName(fieldName, this.rowExpandLookupFields)
+    return Boolean(field?.displayName?.trim())
   }
 
   /** converter 実行に最低限必要な Query が揃っているか */
@@ -85,6 +132,7 @@ export class BizmarcheConverterMapping extends LitElement {
       targetSearchPath: this.targetSearchPath,
       entitySchemaState: this.entitySchemaState,
       viewFields: this.viewFields,
+      rowExpands: normalizeRowExpands(this.rowExpands),
     })
   }
 
@@ -165,19 +213,27 @@ export class BizmarcheConverterMapping extends LitElement {
 
         <div class="main">
           <aside class="sidebar">
-            <section class="panel">
-              <div class="panel-title">EntitySchema JSON</div>
-              <textarea
-                class="json-area"
-                .value=${this.entityJsonText}
-                @input=${(e: Event) => {
-                  this.entityJsonText = (e.target as HTMLTextAreaElement).value
-                }}
-              ></textarea>
-              <button type="button" @click=${this.applyEntityJson}>
-                JSONを反映
-              </button>
-            </section>
+            <details
+              class="panel entity-json-panel"
+              .open=${this.entityJsonExpanded}
+              @toggle=${this.onEntityJsonPanelToggle}
+            >
+              <summary class="panel-title entity-json-summary">
+                EntitySchema JSON
+              </summary>
+              <div class="entity-json-body">
+                <textarea
+                  class="json-area"
+                  .value=${this.entityJsonText}
+                  @input=${(e: Event) => {
+                    this.entityJsonText = (e.target as HTMLTextAreaElement).value
+                  }}
+                ></textarea>
+                <button type="button" @click=${this.applyEntityJson}>
+                  JSONを反映
+                </button>
+              </div>
+            </details>
             <section class="panel palette-panel">
               <div class="panel-title">Entity フィールド</div>
               <entity-field-palette
@@ -192,6 +248,60 @@ export class BizmarcheConverterMapping extends LitElement {
           </div>
 
           <aside class="sidebar right">
+            <section class="panel row-expands-panel">
+              <div class="panel-title">行展開（rowExpands）</div>
+              <p class="row-expands-hint">
+                配列項目を行展開（CrossJoin）。集計と併用不可。
+              </p>
+              <datalist id="row-expand-suggestions">
+                ${this.rowExpandLookupFields.map(
+                  (f) =>
+                    html`<option value=${entityFieldDisplayLabel(f)}></option>`,
+                )}
+              </datalist>
+              <div class="row-expands-list">
+                ${this.rowExpands.length === 0
+                  ? html`<div class="row-expands-empty">未設定</div>`
+                  : this.rowExpands.map(
+                      (entry) => html`
+                        <div class="row-expand-row">
+                          <div class="row-expand-main">
+                            <input
+                              type="text"
+                              class="row-expand-input"
+                              .value=${this.rowExpandDisplayValue(
+                                entry.fieldName,
+                              )}
+                              placeholder="配列項目名（例: quantities）"
+                              list="row-expand-suggestions"
+                              @input=${(e: Event) =>
+                                this.onRowExpandInput(
+                                  entry.id,
+                                  (e.target as HTMLInputElement).value,
+                                )}
+                            />
+                            ${this.rowExpandShowsFieldNameSub(entry.fieldName)
+                              ? html`<span class="row-expand-sub"
+                                  >${entry.fieldName}</span
+                                >`
+                              : null}
+                          </div>
+                          <button
+                            type="button"
+                            class="row-expand-remove"
+                            title="削除"
+                            @click=${() => this.removeRowExpand(entry.id)}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      `,
+                    )}
+              </div>
+              <button type="button" @click=${this.addRowExpand}>
+                + 行展開項目
+              </button>
+            </section>
             <section class="panel output-panel">
               <div class="panel-title">出力（IndexAppQuery）</div>
               <pre class="json-preview query-preview">${this.queryJson}</pre>
@@ -347,6 +457,10 @@ export class BizmarcheConverterMapping extends LitElement {
     }
   }
 
+  private onEntityJsonPanelToggle(e: Event) {
+    this.entityJsonExpanded = (e.target as HTMLDetailsElement).open
+  }
+
   private applyEntityJson() {
     const parsed = parseEntitySchemaJson(this.entityJsonText)
     if (!parsed) {
@@ -425,7 +539,9 @@ export class BizmarcheConverterMapping extends LitElement {
       : [...this.viewFields, vf]
 
     await ed.addViewFieldNode(vf)
-    await ed.addEntityFieldNode(fieldName)
+    await ed.refreshViewFieldNode(vf.id)
+    const entityField = this.entityFields.find((f) => f.fieldName === fieldName)
+    await ed.addEntityFieldNode(fieldName, entityField?.displayName)
     await ed.connectEntityFieldToView(fieldName, vf.id)
   }
 
@@ -437,7 +553,9 @@ export class BizmarcheConverterMapping extends LitElement {
     const vf = createViewFieldState()
     this.viewFields = [...this.viewFields, vf]
     const ed = await this.ensureEditor()
-    await ed?.addViewFieldNode(vf)
+    if (!ed) return
+    await ed.addViewFieldNode(vf)
+    await ed.refreshViewFieldNode(vf.id)
     this.rebuildQueryJson()
   }
 
@@ -459,6 +577,27 @@ export class BizmarcheConverterMapping extends LitElement {
 
   private rebuildQueryJson() {
     this.queryJson = JSON.stringify(this.buildCurrentQuery(), null, 2)
+  }
+
+  private addRowExpand() {
+    this.rowExpands = [...this.rowExpands, createRowExpandEntry()]
+    this.rebuildQueryJson()
+  }
+
+  private removeRowExpand(id: string) {
+    this.rowExpands = this.rowExpands.filter((e) => e.id !== id)
+    this.rebuildQueryJson()
+  }
+
+  private onRowExpandInput(id: string, rawInput: string) {
+    const fieldName = resolveEntityFieldName(
+      rawInput,
+      this.rowExpandLookupFields,
+    )
+    this.rowExpands = this.rowExpands.map((e) =>
+      e.id === id ? { ...e, fieldName } : e,
+    )
+    this.rebuildQueryJson()
   }
 
   private async runConverter() {
@@ -634,9 +773,49 @@ export class BizmarcheConverterMapping extends LitElement {
       min-height: 0;
     }
 
-    /* 上の JSON パネルは固定気味、フィールド一覧は残り高さでスクロール */
-    .sidebar > .panel:first-of-type {
+    .entity-json-panel {
       flex-shrink: 0;
+    }
+
+    .entity-json-panel[open] {
+      flex: 0 1 45%;
+      min-height: 0;
+      max-height: 55%;
+      overflow: hidden;
+    }
+
+    .entity-json-summary {
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+    }
+
+    .entity-json-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .entity-json-summary::before {
+      content: '▸ ';
+      opacity: 0.75;
+    }
+
+    .entity-json-panel[open] > .entity-json-summary::before {
+      content: '▾ ';
+    }
+
+    .entity-json-body {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+      flex: 1;
+    }
+
+    .entity-json-panel[open] .json-area {
+      flex: 1;
+      min-height: 120px;
+      max-height: none;
+      resize: none;
     }
 
     .palette-panel {
@@ -660,7 +839,7 @@ export class BizmarcheConverterMapping extends LitElement {
 
     .json-area {
       width: 100%;
-      min-height: 120px;
+      min-height: 0;
       max-height: 200px;
       box-sizing: border-box;
       padding: 8px;
@@ -676,6 +855,66 @@ export class BizmarcheConverterMapping extends LitElement {
     .output-panel {
       flex: 1;
       min-height: 0;
+    }
+
+    .row-expands-panel {
+      flex-shrink: 0;
+    }
+
+    .row-expands-hint {
+      margin: 0;
+      font-size: 11px;
+      opacity: 0.75;
+      line-height: 1.4;
+    }
+
+    .row-expands-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .row-expands-empty {
+      font-size: 12px;
+      opacity: 0.6;
+    }
+
+    .row-expand-row {
+      display: flex;
+      gap: 6px;
+      align-items: flex-start;
+    }
+
+    .row-expand-main {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .row-expand-sub {
+      font-size: 10px;
+      opacity: 0.65;
+      word-break: break-all;
+    }
+
+    .row-expand-input {
+      flex: 1;
+      min-width: 0;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: inherit;
+      font-size: 12px;
+    }
+
+    .row-expand-remove {
+      flex-shrink: 0;
+      width: 28px;
+      padding: 4px 0;
+      line-height: 1;
     }
 
     .panel-title.sub {
@@ -745,9 +984,21 @@ export class BizmarcheConverterMapping extends LitElement {
       --node-width: 200px;
     }
 
-    /* ViewField ノードは幅をノード側 width でも指定しているが念のため */
+    /* ViewField: 2 行の入力が収まるよう高さは内容に合わせる */
     #rete rete-node:has(bm-view-field-control) {
       --node-width: 248px;
+      height: auto !important;
+      min-height: 0;
+    }
+
+    #rete rete-node:has(bm-view-field-control) .control,
+    #rete rete-node:has(bm-view-field-control) .controls {
+      overflow: visible;
+    }
+
+    #rete bm-view-field-control {
+      display: block;
+      width: 100%;
     }
   `
 }

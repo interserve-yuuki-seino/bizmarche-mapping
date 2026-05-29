@@ -147,9 +147,37 @@ declare global {
   }
 }
 
+/** Rete 用カスタム Control（lit-plugin が確実に識別できるようクラス化） */
+export class ReteViewFieldControl extends ClassicPreset.Control {
+  readonly kind = 'viewFieldControl' as const
+
+  viewFieldId: string
+  fieldName: string
+  formula: string
+  overrideFieldName: boolean
+  syncRevision: number
+  onPatch: (patch: ViewFieldPatch) => void
+
+  constructor(payload: Omit<ViewFieldControlPayload, 'kind'>) {
+    super()
+    this.viewFieldId = payload.viewFieldId
+    this.fieldName = payload.fieldName
+    this.formula = payload.formula
+    this.overrideFieldName = payload.overrideFieldName
+    this.syncRevision = payload.syncRevision ?? 0
+    this.onPatch = payload.onPatch
+  }
+}
+
+export function isReteViewFieldControl(
+  payload: unknown,
+): payload is ReteViewFieldControl {
+  return payload instanceof ReteViewFieldControl
+}
+
 /** rete Control として登録 */
 export function asViewFieldControl(
-  payload: ViewFieldControlPayload,
-): ViewFieldControlPayload & ClassicPreset.Control {
-  return Object.assign(new ClassicPreset.Control(), payload)
+  payload: Omit<ViewFieldControlPayload, 'kind'>,
+): ReteViewFieldControl {
+  return new ReteViewFieldControl(payload)
 }

@@ -55,7 +55,10 @@ export function applyConnections(
 }
 
 /** @deprecated buildQueryJson を使用 */
-export function buildViewSchemaJson(viewFields: ViewFieldState[]): string {
+export function buildViewSchemaJson(
+  viewFields: ViewFieldState[],
+  rowExpands: string[] = [],
+): string {
   const fields = viewFields
     .map((vf) => {
       const fieldName = vf.fieldName.trim()
@@ -67,7 +70,10 @@ export function buildViewSchemaJson(viewFields: ViewFieldState[]): string {
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
 
-  const out: IndexAppViewSchema = fields.length > 0 ? { fields } : {}
+  const expands = rowExpands.map((x) => x.trim()).filter(Boolean)
+  const out: IndexAppViewSchema = {}
+  if (fields.length > 0) out.fields = fields
+  if (expands.length > 0) out.rowExpands = expands
   return JSON.stringify({ viewSchema: out }, null, 2)
 }
 
