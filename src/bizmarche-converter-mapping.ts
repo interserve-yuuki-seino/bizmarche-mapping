@@ -1,6 +1,5 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
-import { guard } from 'lit/directives/guard.js'
 import { apiConfig } from './api/config'
 import {
   createMappingEditor,
@@ -46,6 +45,8 @@ import {
 } from './mapping/row-expands-state'
 import './ui/entity-field-palette'
 import './ui/formula-builder'
+import './ui/converter-result-panel'
+import { buildConverterResultPreview } from './ui/converter-result-preview'
 import type {
   FormulaBuilder,
   FormulaBuilderCommitDetail,
@@ -105,7 +106,9 @@ export class BizmarcheConverterMapping extends LitElement {
   @state() private queryJson = '{}'
   @state() private loadingConverter = false
   @state() private converterError: string | null = null
-  @state() private converterResultJson = ''
+  @state() private converterResultPreview = ''
+  /** 再描画対象外。DL 時のみ参照 */
+  private _converterResultFull = ''
 
   /** 数式ビルダー対象 ViewField */
   @state() private formulaBuilderViewFieldId = ''
@@ -422,14 +425,11 @@ export class BizmarcheConverterMapping extends LitElement {
               ${this.converterError
                 ? html`<div class="inline-error">${this.converterError}</div>`
                 : null}
-              ${guard([this.converterResultJson], () =>
-                this.converterResultJson
-                  ? html`
-                      <div class="panel-title sub">変換結果</div>
-                      <pre class="json-preview">${this.converterResultJson}</pre>
-                    `
-                  : null,
-              )}
+              <bm-converter-result-panel
+                .preview=${this.converterResultPreview}
+                .hasResult=${this.converterResultPreview.length > 0}
+                .onDownload=${this.downloadConverterResult}
+              ></bm-converter-result-panel>
             </section>
           </aside>
         </div>
@@ -772,7 +772,26 @@ export class BizmarcheConverterMapping extends LitElement {
     this.rebuildQueryJson()
   }
 
+  private clearConverterResult(): void {
+    this._converterResultFull = ''
+    this.converterResultPreview = ''
+  }
+
+  private downloadConverterResult = (): void => {
+    if (!this._converterResultFull) return
+    const blob = new Blob([this._converterResultFull], {
+      type: 'application/json;charset=utf-8',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `converter-result-${Date.now()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   private handleViewFieldPatch(patch: ViewFieldPatch) {
+    this.clearConverterResult()
     this.viewFields = this.viewFields.map((n) =>
       n.id === patch.id ? { ...n, ...patch } : n,
     )
@@ -812,6 +831,7 @@ export class BizmarcheConverterMapping extends LitElement {
   }
 
   private handleConnectionsChange(next: ViewFieldConnection[]) {
+    this.clearConverterResult()
     const prev = this.connections
     this.connections = next
     this.viewFields = applyConnections(this.viewFields, next, prev)
@@ -861,11 +881,13 @@ export class BizmarcheConverterMapping extends LitElement {
 
     this.loadingConverter = true
     this.converterError = null
-    this.converterResultJson = ''
+    this.clearConverterResult()
 
     try {
       const res = await postConverterQuery(query)
-      this.converterResultJson = JSON.stringify(res, null, 2)
+      const full = JSON.stringify(res, null, 2)
+      this._converterResultFull = full
+      this.converterResultPreview = buildConverterResultPreview(full)
       if (res.resultCode !== 0) {
         this.converterError =
           res.resultMessage ?? `converter エラー (code: ${res.resultCode})`
@@ -875,7 +897,7 @@ export class BizmarcheConverterMapping extends LitElement {
         e instanceof Error
           ? e.message
           : 'converter の呼び出しに失敗しました。CORS / 接続先を確認してください。'
-      this.converterResultJson = ''
+      this.clearConverterResult()
     } finally {
       this.loadingConverter = false
     }
