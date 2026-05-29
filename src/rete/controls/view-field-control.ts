@@ -55,6 +55,23 @@ export class ViewFieldControl extends LitElement {
     this._formula = this.formula
   }
 
+  /** 親で Blockly 数式ビルダーを開く */
+  private openFormulaBuilder(): void {
+    this.dispatchEvent(
+      new CustomEvent<{ viewFieldId: string; formula: string }>(
+        'open-formula-builder',
+        {
+          bubbles: true,
+          composed: true,
+          detail: {
+            viewFieldId: this.viewFieldId,
+            formula: this._formula,
+          },
+        },
+      ),
+    )
+  }
+
   render() {
     return html`
       <div class="root" @pointerdown=${(e: Event) => e.stopPropagation()}>
@@ -77,16 +94,26 @@ export class ViewFieldControl extends LitElement {
         </label>
         <label class="row">
           <span class="label">formula</span>
-          <input
-            class="text"
-            .value=${this._formula}
-            @input=${(e: Event) => {
-              const v = (e.target as HTMLInputElement).value
-              this._formula = v
-              this.onPatch({ id: this.viewFieldId, formula: v })
-            }}
-            placeholder="entity フィールド名または式"
-          />
+          <div class="formula-row">
+            <input
+              class="text"
+              .value=${this._formula}
+              @input=${(e: Event) => {
+                const v = (e.target as HTMLInputElement).value
+                this._formula = v
+                this.onPatch({ id: this.viewFieldId, formula: v })
+              }}
+              placeholder="entity フィールド名または式"
+            />
+            <button
+              type="button"
+              class="fx"
+              title="ブロックで数式を編集"
+              @click=${() => this.openFormulaBuilder()}
+            >
+              fx
+            </button>
+          </div>
         </label>
       </div>
     `
@@ -137,6 +164,34 @@ export class ViewFieldControl extends LitElement {
 
     .text::placeholder {
       color: #6b7280;
+    }
+
+    .formula-row {
+      display: flex;
+      gap: 4px;
+      align-items: stretch;
+      min-width: 0;
+    }
+
+    .formula-row .text {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .fx {
+      flex-shrink: 0;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 0 8px;
+      border: 1px solid #9ca3af;
+      border-radius: 4px;
+      background: #eef2ff;
+      color: #3730a3;
+      cursor: pointer;
+    }
+
+    .fx:hover {
+      background: #e0e7ff;
     }
   `
 }

@@ -44,6 +44,11 @@ import {
   type RowExpandEntry,
 } from './mapping/row-expands-state'
 import './ui/entity-field-palette'
+import './ui/formula-builder'
+import type {
+  FormulaBuilder,
+  FormulaBuilderCommitDetail,
+} from './ui/formula-builder'
 
 /** ViewSchema テンプレート適用の長押し時間（ms） */
 const VIEW_TEMPLATE_HOLD_MS = 700
@@ -101,10 +106,20 @@ export class BizmarcheConverterMapping extends LitElement {
   @state() private converterError: string | null = null
   @state() private converterResultJson = ''
 
+  /** 数式ビルダー対象 ViewField */
+  @state() private formulaBuilderViewFieldId = ''
+
   /** パレット表示用（キャンバスに出ている Entity は除外） */
   private get paletteEntityFields(): EntityFieldRow[] {
     const onCanvas = new Set(this.canvasEntityFieldNames)
     return this.entityFields.filter((f) => !onCanvas.has(f.fieldName))
+  }
+
+  /** 数式ビルダーの項目ドロップダウン候補 */
+  private get formulaBuilderFieldNames(): string[] {
+    return this.entityFields
+      .map((f) => f.fieldName.trim())
+      .filter(Boolean)
   }
 
   /** rowExpands 入力の datalist 候補（Entity フィールド） */
@@ -170,7 +185,10 @@ export class BizmarcheConverterMapping extends LitElement {
 
   render() {
     return html`
-      <div class="layout">
+      <div
+        class="layout"
+        @open-formula-builder=${this.onOpenFormulaBuilder}
+      >
         <header class="topbar">
           <span class="title">Converter Mapping</span>
           <label>
@@ -413,6 +431,10 @@ export class BizmarcheConverterMapping extends LitElement {
           </aside>
         </div>
       </div>
+      <bm-formula-builder
+        .fieldNames=${this.formulaBuilderFieldNames}
+        @formula-commit=${this.onFormulaBuilderCommit}
+      ></bm-formula-builder>
     `
   }
 
@@ -753,6 +775,36 @@ export class BizmarcheConverterMapping extends LitElement {
     )
     this.rebuildQueryJson()
     // 入力中は control を差し替えない（フォーカス維持）
+    if (patch.formula !== undefined) {
+      void this.syncViewFieldFormulaToEditor(patch.id)
+    }
+  }
+
+  private async syncViewFieldFormulaToEditor(viewFieldId: string): Promise<void> {
+    const vf = this.viewFields.find((v) => v.id === viewFieldId)
+    const ed = await this.ensureEditor()
+    if (!vf || !ed) return
+    ed.syncViewFields([vf])
+  }
+
+  private onOpenFormulaBuilder(
+    e: CustomEvent<{ viewFieldId: string; formula: string }>,
+  ): void {
+    e.stopPropagation()
+    const { viewFieldId, formula } = e.detail
+    this.formulaBuilderViewFieldId = viewFieldId
+    const builder =
+      this.renderRoot.querySelector<FormulaBuilder>('bm-formula-builder')
+    void builder?.open(formula)
+  }
+
+  private onFormulaBuilderCommit(
+    e: CustomEvent<FormulaBuilderCommitDetail>,
+  ): void {
+    const id = this.formulaBuilderViewFieldId
+    if (!id) return
+    this.handleViewFieldPatch({ id, formula: e.detail.formula })
+    this.formulaBuilderViewFieldId = ''
   }
 
   private handleConnectionsChange(next: ViewFieldConnection[]) {
