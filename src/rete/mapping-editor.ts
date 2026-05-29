@@ -44,6 +44,8 @@ export type MappingEditorHandle = {
     viewFieldId: string,
   ) => Promise<void>
   syncViewFields: (viewFields: ViewFieldState[]) => void
+  /** 既存 ViewField を全削除してから差し替え */
+  replaceViewFields: (viewFields: ViewFieldState[]) => Promise<void>
   /** 初回描画で control が載らない場合の再描画 */
   refreshViewFieldNode: (viewFieldId: string) => Promise<void>
   refreshAllViewFieldNodes: () => Promise<void>
@@ -449,6 +451,16 @@ export async function createMappingEditor(
     syncViewFields(viewFields: ViewFieldState[]) {
       for (const vf of viewFields) {
         syncViewFieldControl(vf)
+      }
+    },
+
+    async replaceViewFields(viewFields: ViewFieldState[]) {
+      for (const id of [...viewNodeById.keys()]) {
+        await handle.removeViewFieldNode(id)
+      }
+      for (const vf of viewFields) {
+        await handle.addViewFieldNode(vf)
+        await handle.refreshViewFieldNode(vf.id)
       }
     },
 

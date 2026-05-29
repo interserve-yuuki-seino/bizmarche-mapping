@@ -6,4 +6,5 @@ export const apiConfig = {
     'http://index-core-convert-api.isbe.in.nakamenosakura.com/api',
   bucketCodeMapping: 'biz-marche-convert-management',
   entitySchemaCatalogPath: 'settings/test/entitySchema/catalog',
+  viewSchemaCatalogPath: 'settings/test/viewSchema/catalog',
 } as const

@@ -8,10 +8,14 @@ import {
 import type { EntitySchemaCatalogItem } from './api/catalog'
 import {
   getEntitySchemaCatalog,
+  getViewSchemaCatalog,
   resolveCatalogSchemaPath,
   resolveCatalogTargetSearchPath,
+  resolveViewSchemaPath,
 } from './api/catalog'
 import { getEntitySchemaText } from './api/entity-schema'
+import { getViewSchema } from './api/view-schema'
+import { viewStateFromViewSchema } from './mapping/view-schema-state'
 import {
   createEmptyEntitySchemaState,
   entitySchemaStateFromDefinition,
@@ -41,16 +45,27 @@ import {
 } from './mapping/row-expands-state'
 import './ui/entity-field-palette'
 
+/** ViewSchema テンプレート適用の長押し時間（ms） */
+const VIEW_TEMPLATE_HOLD_MS = 700
+
 @customElement('bizmarche-converter-mapping')
 export class BizmarcheConverterMapping extends LitElement {
   private _editor?: MappingEditorHandle
   private _editorInit?: Promise<void>
   /** 直近に読み込んだカタログ path（属性変更時の再読込判定） */
   private _loadedCatalogPath = ''
+  private _loadedViewCatalogPath = ''
+  /** 長押し適用の RAF / タイマー */
+  private _applyHoldRafId = 0
+  private _applyHoldStartMs = 0
 
   /** EntitySchema カタログの fileSystemId（未指定時は config の既定値） */
   @property({ type: String, attribute: 'catalog-path' })
   catalogPath = ''
+
+  /** ViewSchema カタログの fileSystemId（未指定時は config の既定値） */
+  @property({ type: String, attribute: 'view-catalog-path' })
+  viewCatalogPath = ''
 
   @state() private catalogItems: EntitySchemaCatalogItem[] = []
   @state() private selectedCatalogId = ''
@@ -61,6 +76,15 @@ export class BizmarcheConverterMapping extends LitElement {
   @state() private entityFields: EntityFieldRow[] = []
   @state() private entitySchemaState: EntitySchemaState =
     createEmptyEntitySchemaState()
+
+  @state() private viewCatalogItems: EntitySchemaCatalogItem[] = []
+  @state() private selectedViewCatalogId = ''
+  @state() private pendingViewCatalogId = ''
+  @state() private loadingViewCatalog = false
+  @state() private loadingViewSchema = false
+  @state() private viewCatalogError: string | null = null
+  @state() private viewSchemaError: string | null = null
+  @state() private applyHoldProgress = 0
 
   @state() private loadingCatalog = false
   @state() private loadingSchema = false
@@ -114,6 +138,14 @@ export class BizmarcheConverterMapping extends LitElement {
   private rowExpandShowsFieldNameSub(fieldName: string): boolean {
     const field = findEntityFieldByName(fieldName, this.rowExpandLookupFields)
     return Boolean(field?.displayName?.trim())
+  }
+
+  /** ViewSchema テンプレートに未適用の選択があるか */
+  private get hasPendingViewTemplate(): boolean {
+    return (
+      Boolean(this.pendingViewCatalogId) &&
+      this.pendingViewCatalogId !== this.selectedViewCatalogId
+    )
   }
 
   /** converter 実行に最低限必要な Query が揃っているか */
@@ -204,11 +236,66 @@ export class BizmarcheConverterMapping extends LitElement {
           <button type="button" @click=${this.addViewField}>+ ViewField</button>
         </header>
 
+        <div class="view-catalog-bar">
+          <label>
+            ViewSchema（catalog）
+            <select
+              .value=${this.pendingViewCatalogId}
+              ?disabled=${this.loadingViewCatalog}
+              @change=${this.onViewCatalogChange}
+            >
+              ${this.viewCatalogItems.length === 0
+                ? html`<option value="">— 選択 —</option>`
+                : null}
+              ${this.viewCatalogItems.map(
+                (item) => html`
+                  <option value=${item.id}>${item.name ?? item.id}</option>
+                `,
+              )}
+            </select>
+          </label>
+          <button
+            type="button"
+            class="apply-template-btn"
+            ?disabled=${this.loadingViewSchema || !this.hasPendingViewTemplate}
+            aria-label="長押しでテンプレートを適用"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow=${Math.round(this.applyHoldProgress * 100)}
+            style=${this.applyHoldProgress > 0
+              ? `--hold-progress:${this.applyHoldProgress}`
+              : ''}
+            @pointerdown=${this.onApplyTemplatePressStart}
+            @pointerup=${this.onApplyTemplatePressEnd}
+            @pointerleave=${this.onApplyTemplatePressEnd}
+            @pointercancel=${this.onApplyTemplatePressEnd}
+          >
+            ${this.loadingViewSchema
+              ? '適用中...'
+              : this.applyHoldProgress > 0
+                ? `適用中… ${Math.round(this.applyHoldProgress * 100)}%`
+                : '長押しでテンプレートを適用'}
+          </button>
+          <button
+            type="button"
+            ?disabled=${this.loadingViewCatalog}
+            @click=${() => void this.loadViewCatalog()}
+          >
+            ${this.loadingViewCatalog ? '読込中...' : 'Viewカタログ再読込'}
+          </button>
+        </div>
+
         ${this.catalogError
           ? html`<div class="banner error">${this.catalogError}</div>`
           : null}
         ${this.schemaError
           ? html`<div class="banner error">${this.schemaError}</div>`
+          : null}
+        ${this.viewCatalogError
+          ? html`<div class="banner error">${this.viewCatalogError}</div>`
+          : null}
+        ${this.viewSchemaError
+          ? html`<div class="banner error">${this.viewSchemaError}</div>`
           : null}
 
         <div class="main">
@@ -332,22 +419,42 @@ export class BizmarcheConverterMapping extends LitElement {
   protected override firstUpdated() {
     void this.initEditor()
     void this.loadCatalog()
+    void this.loadViewCatalog()
   }
 
   override updated(changed: PropertyValues) {
-    if (!changed.has('catalogPath')) return
-    const path = this.resolveCatalogPath()
-    if (path === this._loadedCatalogPath) return
-    this.selectedCatalogId = ''
-    void this.loadCatalog()
+    if (changed.has('catalogPath')) {
+      const path = this.resolveCatalogPath()
+      if (path !== this._loadedCatalogPath) {
+        this.selectedCatalogId = ''
+        void this.loadCatalog()
+      }
+    }
+    if (changed.has('viewCatalogPath')) {
+      const path = this.resolveViewCatalogPath()
+      if (path !== this._loadedViewCatalogPath) {
+        this.selectedViewCatalogId = ''
+        this.pendingViewCatalogId = ''
+        void this.loadViewCatalog()
+      }
+    }
+  }
+
+  override disconnectedCallback() {
+    this.cancelApplyTemplateHold()
+    this.teardownEditor()
+    super.disconnectedCallback()
   }
 
   private resolveCatalogPath(): string {
     return this.catalogPath.trim() || apiConfig.entitySchemaCatalogPath
   }
 
-  override disconnectedCallback() {
-    super.disconnectedCallback()
+  private resolveViewCatalogPath(): string {
+    return this.viewCatalogPath.trim() || apiConfig.viewSchemaCatalogPath
+  }
+
+  private teardownEditor() {
     this._editor?.destroy()
     this._editor = undefined
     this._editorInit = undefined
@@ -379,6 +486,105 @@ export class BizmarcheConverterMapping extends LitElement {
   private async ensureEditor(): Promise<MappingEditorHandle | undefined> {
     await this.initEditor()
     return this._editor
+  }
+
+  private async loadViewCatalog() {
+    this.loadingViewCatalog = true
+    this.viewCatalogError = null
+    try {
+      const catalogPath = this.resolveViewCatalogPath()
+      const items = await getViewSchemaCatalog(catalogPath)
+      this._loadedViewCatalogPath = catalogPath
+      this.viewCatalogItems = items
+      if (items.length > 0) {
+        const pendingValid = items.some((x) => x.id === this.pendingViewCatalogId)
+        if (!pendingValid) {
+          this.pendingViewCatalogId = items[0]!.id
+        }
+      } else {
+        this.pendingViewCatalogId = ''
+      }
+    } catch {
+      this.viewCatalogError =
+        'ViewSchemaカタログの取得に失敗しました。接続先とCORS設定を確認してください。'
+      this.viewCatalogItems = []
+    } finally {
+      this.loadingViewCatalog = false
+    }
+  }
+
+  private onViewCatalogChange(e: Event) {
+    const id = (e.target as HTMLSelectElement).value
+    this.pendingViewCatalogId = id
+    this.cancelApplyTemplateHold()
+  }
+
+  private onApplyTemplatePressStart(e: PointerEvent) {
+    if (this.loadingViewSchema || !this.hasPendingViewTemplate) return
+    e.preventDefault()
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    this.cancelApplyTemplateHold()
+    this._applyHoldStartMs = performance.now()
+    this.applyHoldProgress = 0
+    const tick = () => {
+      const elapsed = performance.now() - this._applyHoldStartMs
+      const progress = Math.min(1, elapsed / VIEW_TEMPLATE_HOLD_MS)
+      this.applyHoldProgress = progress
+      if (progress >= 1) {
+        this.cancelApplyTemplateHold()
+        void this.applyPendingViewTemplate()
+        return
+      }
+      this._applyHoldRafId = requestAnimationFrame(tick)
+    }
+    this._applyHoldRafId = requestAnimationFrame(tick)
+  }
+
+  private onApplyTemplatePressEnd(e: PointerEvent) {
+    if ((e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) {
+      ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
+    }
+    if (this.applyHoldProgress < 1) {
+      this.cancelApplyTemplateHold()
+    }
+  }
+
+  private cancelApplyTemplateHold() {
+    if (this._applyHoldRafId) {
+      cancelAnimationFrame(this._applyHoldRafId)
+      this._applyHoldRafId = 0
+    }
+    this.applyHoldProgress = 0
+  }
+
+  private async applyPendingViewTemplate() {
+    const id = this.pendingViewCatalogId
+    if (!id) return
+    const item = this.viewCatalogItems.find((x) => x.id === id)
+    if (!item) return
+
+    this.loadingViewSchema = true
+    this.viewSchemaError = null
+    try {
+      const schemaPath = resolveViewSchemaPath(item)
+      const schema = await getViewSchema(schemaPath)
+      const { viewFields, rowExpands } = viewStateFromViewSchema(schema)
+      this.viewFields = viewFields
+      this.rowExpands = rowExpands
+      this.connections = []
+      this.selectedViewCatalogId = id
+
+      const ed = await this.ensureEditor()
+      if (ed) {
+        await ed.replaceViewFields(viewFields)
+      }
+      this.rebuildQueryJson()
+    } catch {
+      this.viewSchemaError =
+        'ViewSchema の取得に失敗しました。接続先とCORS設定を確認してください。'
+    } finally {
+      this.loadingViewSchema = false
+    }
   }
 
   private async loadCatalog() {
@@ -490,7 +696,7 @@ export class BizmarcheConverterMapping extends LitElement {
     this.rebuildQueryJson()
   }
 
-  /** 未使用の ViewField を探すか、同名用に新規作成 */
+  /** 既に接続済みならその ViewField、それ以外は常に新規作成（空き ViewField は使わない） */
   private findOrCreateViewFieldForEntity(fieldName: string): ViewFieldState {
     const linked = new Map(
       this.connections.map((c) => [c.toViewFieldId, c.fromEntityFieldName]),
@@ -500,24 +706,6 @@ export class BizmarcheConverterMapping extends LitElement {
       (vf) => linked.get(vf.id) === fieldName,
     )
     if (byConnection) return byConnection
-
-    const byName = this.viewFields.find((vf) => vf.fieldName === fieldName)
-    if (byName) return byName
-
-    const idle = this.viewFields.find(
-      (vf) =>
-        !linked.has(vf.id) &&
-        !vf.fieldName.trim() &&
-        !vf.formula.trim(),
-    )
-    if (idle) {
-      return {
-        ...idle,
-        fieldName,
-        formula: fieldName,
-        overrideFieldName: false,
-      }
-    }
 
     return {
       ...createViewFieldState(),
@@ -677,6 +865,40 @@ export class BizmarcheConverterMapping extends LitElement {
       padding: 10px 12px;
       border-bottom: 1px solid var(--border);
       background: var(--bg);
+    }
+
+    .view-catalog-bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 8px 12px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel-bg);
+    }
+
+    .apply-template-btn {
+      position: relative;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      min-width: 11rem;
+    }
+
+    .apply-template-btn::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      width: calc(var(--hold-progress, 0) * 100%);
+      background: rgba(37, 99, 235, 0.25);
+      pointer-events: none;
+      transition: none;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .apply-template-btn::before {
+        background: rgba(59, 130, 246, 0.35);
+      }
     }
 
     .title {

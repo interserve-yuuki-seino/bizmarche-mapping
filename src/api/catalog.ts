@@ -6,6 +6,8 @@ export type EntitySchemaCatalogProfiles = {
   target?: string
   /** EntitySchema の fileSystemId */
   entitySchema?: string
+  /** ViewSchema の fileSystemId */
+  viewSchema?: string
   schemaPath?: string
 }
 
@@ -31,6 +33,9 @@ function readProfiles(row: object): EntitySchemaCatalogProfiles | undefined {
   }
   if (typeof p.schemaPath === 'string' && p.schemaPath.trim()) {
     profiles.schemaPath = p.schemaPath.trim()
+  }
+  if (typeof p.viewSchema === 'string' && p.viewSchema.trim()) {
+    profiles.viewSchema = p.viewSchema.trim()
   }
   return Object.keys(profiles).length > 0 ? profiles : undefined
 }
@@ -90,6 +95,15 @@ function normalizeCatalogResponse(value: unknown): EntitySchemaCatalogItem[] {
   })
 }
 
+/** カタログ 1 件から ViewSchema の fileSystemId を決める */
+export function resolveViewSchemaPath(item: EntitySchemaCatalogItem): string {
+  return (
+    item.schemaPath?.trim() ||
+    item.profiles?.viewSchema?.trim() ||
+    `settings/test/viewSchema/${item.id}`
+  )
+}
+
 /** EntitySchema カタログ一覧を取得 */
 export async function getEntitySchemaCatalog(
   catalogPath: string = apiConfig.entitySchemaCatalogPath,
@@ -102,6 +116,23 @@ export async function getEntitySchemaCatalog(
   const res = await fetch(`${apiConfig.fileSystemApiUrl}/models?${params}`)
   if (!res.ok) {
     throw new Error(`カタログ取得失敗: ${res.status} ${res.statusText}`)
+  }
+  const json: unknown = await res.json()
+  return normalizeCatalogResponse(json)
+}
+
+/** ViewSchema カタログ一覧を取得 */
+export async function getViewSchemaCatalog(
+  catalogPath: string = apiConfig.viewSchemaCatalogPath,
+): Promise<EntitySchemaCatalogItem[]> {
+  const path = catalogPath.trim() || apiConfig.viewSchemaCatalogPath
+  const params = new URLSearchParams({
+    bucketCode: apiConfig.bucketCodeMapping,
+    fileSystemId: path,
+  })
+  const res = await fetch(`${apiConfig.fileSystemApiUrl}/models?${params}`)
+  if (!res.ok) {
+    throw new Error(`ViewSchemaカタログ取得失敗: ${res.status} ${res.statusText}`)
   }
   const json: unknown = await res.json()
   return normalizeCatalogResponse(json)
