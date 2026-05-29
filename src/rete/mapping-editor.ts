@@ -13,6 +13,7 @@ import {
   asViewFieldControl,
   isReteViewFieldControl,
   type ReteViewFieldControl,
+  type ViewFieldControl,
 } from './controls/view-field-control'
 
 import './controls/view-field-control'
@@ -105,6 +106,37 @@ export async function createMappingEditor(
   editor.use(area)
   area.use(render)
   area.use(connection)
+
+  // rete の再描画（area.update('node'|'control')）はノード/ペイロード参照が
+  // 同一だと Lit が更新を省くため、control の値変更が DOM へ伝わらない。
+  // そこで対象の bm-view-field-control 要素を Shadow DOM 越しに探索し、
+  // プロパティを直接更新して確実に表示へ反映する。
+  const findViewFieldControlElement = (
+    viewFieldId: string,
+  ): ViewFieldControl | undefined => {
+    const roots: (Element | ShadowRoot | Document)[] = [container]
+    while (roots.length) {
+      const root = roots.shift() as ParentNode
+      const matches = Array.from(
+        root.querySelectorAll('bm-view-field-control'),
+      ) as ViewFieldControl[]
+      for (const el of matches) {
+        if (el.viewFieldId === viewFieldId) return el
+      }
+      for (const el of Array.from(root.querySelectorAll('*'))) {
+        if (el.shadowRoot) roots.push(el.shadowRoot)
+      }
+    }
+    return undefined
+  }
+
+  const pushControlToElement = (vf: ViewFieldState): void => {
+    const el = findViewFieldControlElement(vf.id)
+    if (!el) return
+    el.fieldName = vf.fieldName
+    el.formula = vf.formula
+    el.overrideFieldName = vf.overrideFieldName
+  }
 
   const entityFieldNodeByName = new Map<string, EntityFieldNode>()
   const viewNodeById = new Map<string, ClassicPreset.Node>()
@@ -339,15 +371,27 @@ export async function createMappingEditor(
     const node = viewNodeById.get(vf.id)
     if (!node) return
     const existing = node.controls?.viewField
+    // 既存 control が無い場合のみ生成（通常は addViewFieldNode で作成済み）
+    if (!isReteViewFieldControl(existing)) {
+      replaceViewFieldControl(node, vf)
+      return
+    }
     if (
-      isReteViewFieldControl(existing) &&
       existing.fieldName === vf.fieldName &&
       existing.formula === vf.formula &&
       existing.overrideFieldName === vf.overrideFieldName
     ) {
       return
     }
-    replaceViewFieldControl(node, vf)
+    // control を差し替えると描画クロージャが旧インスタンスを参照し続け、
+    // 再描画しても新値が反映されない。同一インスタンスを書き換え、
+    // syncRevision を進めて Lit 側の willUpdate で表示を再同期させる。
+    existing.fieldName = vf.fieldName
+    existing.formula = vf.formula
+    existing.overrideFieldName = vf.overrideFieldName
+    existing.syncRevision += 1
+    // 描画済み要素へ直接反映（rete の area.update では更新が届かないため）
+    pushControlToElement(vf)
   }
 
   const refreshViewFieldNode = async (viewFieldId: string) => {

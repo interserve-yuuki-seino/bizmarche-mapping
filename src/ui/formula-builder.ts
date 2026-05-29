@@ -1,6 +1,12 @@
 import { LitElement, css, html } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
 import type { FormulaWorkspaceHandle } from '../formula/blockly/workspace'
+import {
+  ensureBlocklyPopupZIndex,
+  mirrorBlocklyStyles,
+  scheduleRelayoutFormulaWorkspace,
+  waitForElementSize,
+} from '../formula/blockly/workspace-layout'
 
 export type FormulaBuilderCommitDetail = {
   formula: string
@@ -19,11 +25,14 @@ export class FormulaBuilder extends LitElement {
   @state() private loadError: string | null = null
   @state() private previewFormula = ''
   @state() private busy = false
+  /** iif の条件など、shadow のみで未完成のとき false */
+  @state() private formulaComplete = true
 
   private _host?: HTMLElement
   private _handle?: FormulaWorkspaceHandle
   private _open = false
   private _wsChangeBound = false
+  private _resizeObserver?: ResizeObserver
 
   /** モーダルを開く */
   async open(initialFormula?: string): Promise<void> {
@@ -32,6 +41,8 @@ export class FormulaBuilder extends LitElement {
     }
     this._open = true
     this.loadError = null
+    this.previewFormula = this.formula.trim()
+    this.formulaComplete = true
     this.requestUpdate()
     await this.updateComplete
     await this.mountWorkspace()
@@ -45,6 +56,8 @@ export class FormulaBuilder extends LitElement {
 
   private disposeWorkspace(): void {
     this._wsChangeBound = false
+    this._resizeObserver?.disconnect()
+    this._resizeObserver = undefined
     this._handle?.dispose()
     this._handle = undefined
     if (this._host) {
@@ -64,6 +77,8 @@ export class FormulaBuilder extends LitElement {
     this.loadError = null
 
     try {
+      await waitForElementSize(mount)
+
       const { createFormulaWorkspace } = await import(
         '../formula/blockly/workspace'
       )
@@ -72,30 +87,47 @@ export class FormulaBuilder extends LitElement {
       this._host = mount
       const handle = await createFormulaWorkspace(mount, {
         fieldNames: this.fieldNames,
-        initialFormula: this.formula,
       })
       this._handle = handle
 
-      if (this.formula.trim()) {
-        const loadResult = handle.loadFormula(this.formula.trim())
+      // Blockly の CSS は document.head にしか入らず Shadow DOM へ届かないため複製する
+      if (this.renderRoot instanceof ShadowRoot) {
+        mirrorBlocklyStyles(this.renderRoot)
+      }
+      // body 直下に描画される選択リストをモーダルより前面へ
+      ensureBlocklyPopupZIndex()
+      handle.resize()
+
+      const trimmed = this.formula.trim()
+      if (trimmed) {
+        const loadResult = handle.loadFormula(trimmed)
         if (!loadResult.ok) {
           this.loadError = loadResult.error
+          this.previewFormula = trimmed
+        } else {
+          this.previewFormula = handle.getFormula() || trimmed
         }
+      } else {
+        this.previewFormula = ''
       }
-      this.previewFormula = handle.getFormula()
+      this.formulaComplete = handle.isComplete()
       this.bindWorkspaceChangeListener()
+      this.bindResizeObserver(mount, handle)
+      // 接続・描画完了後に中央へ（即時 relayout だと 0,0 張り付きのままになる）
+      scheduleRelayoutFormulaWorkspace(handle.workspace)
     } catch (e) {
       this.loadError =
         e instanceof Error ? e.message : 'Blockly の読み込みに失敗しました'
+      this.previewFormula = this.formula.trim()
     } finally {
       this.busy = false
     }
   }
 
   private onWorkspaceChange(): void {
-    if (this._handle) {
-      this.previewFormula = this._handle.getFormula()
-    }
+    if (!this._handle) return
+    this.previewFormula = this._handle.getFormula()
+    this.formulaComplete = this._handle.isComplete()
   }
 
   private commit(): void {
@@ -134,22 +166,36 @@ export class FormulaBuilder extends LitElement {
           </header>
 
           ${this.loadError
-            ? html`<p class="error">${this.loadError}</p>`
+            ? html`
+                <p class="error">${this.loadError}</p>
+                <p class="error-hint">
+                  ViewField の formula テキスト欄から直接編集できます。
+                </p>
+              `
             : null}
           ${this.busy
             ? html`<p class="hint">Blockly を読み込み中…</p>`
-            : null}
+            : html`
+                <p class="guide">
+                  左からブロックをドラッグし、くぼみにはめ込みます。うっすら表示は見本（編集不可）です。
+                </p>
+              `}
 
-          <div
-            id="blockly-mount"
-            class="mount"
-            @pointerdown=${(e: Event) => e.stopPropagation()}
-          ></div>
+          <div id="blockly-mount" class="mount"></div>
 
           <footer class="footer">
             <label class="preview">
               <span class="preview-label">プレビュー</span>
-              <code class="preview-code">${this.previewFormula || '(空)'}</code>
+              <code class="preview-code"
+                >${this.previewFormula || '(空)'}</code
+              >
+              ${!this.formulaComplete
+                ? html`
+                    <span class="preview-warn"
+                      >条件ブロックを COND にはめ込んでください（うっすら表示は確定に使えません）</span
+                    >
+                  `
+                : null}
             </label>
             <div class="actions">
               <button type="button" class="btn secondary" @click=${this.close}>
@@ -158,7 +204,10 @@ export class FormulaBuilder extends LitElement {
               <button
                 type="button"
                 class="btn primary"
-                ?disabled=${this.busy}
+                ?disabled=${this.busy || !this.formulaComplete}
+                title=${!this.formulaComplete
+                  ? '条件ブロックをはめ込んでから確定してください'
+                  : ''}
                 @click=${this.commit}
               >
                 確定
@@ -168,6 +217,22 @@ export class FormulaBuilder extends LitElement {
         </div>
       </div>
     `
+  }
+
+  private bindResizeObserver(
+    mount: HTMLElement,
+    handle: FormulaWorkspaceHandle,
+  ): void {
+    this._resizeObserver?.disconnect()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    this._resizeObserver = new ResizeObserver(() => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        handle.resize()
+      }, 80)
+    })
+    this._resizeObserver.observe(mount)
   }
 
   private bindWorkspaceChangeListener(): void {
@@ -247,19 +312,74 @@ export class FormulaBuilder extends LitElement {
       font-size: 13px;
     }
 
+    .error-hint {
+      margin: 4px 16px 0;
+      color: #6b7280;
+      font-size: 12px;
+    }
+
     .hint {
       margin: 8px 16px 0;
       color: #6b7280;
       font-size: 13px;
     }
 
+    .guide {
+      margin: 8px 16px 0;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: #374151;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      line-height: 1.45;
+    }
+
     .mount {
       flex: 1;
       min-height: 360px;
+      height: 400px;
       margin: 8px 12px;
       border: 1px solid #d1d5db;
       border-radius: 6px;
       background: #fff;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /*
+     * Blockly の injectionDiv は height:100% を持つが、flex で解決された
+     * .mount の高さは「不定」扱いとなり 100% が 0 に潰れる（SVG 高さ 0）。
+     * .mount を position:relative にし injectionDiv を絶対配置で枠いっぱいに
+     * 広げることで、高さ計算を flex から切り離して安定させる。
+     */
+    .mount .injectionDiv {
+      position: absolute;
+      inset: 0;
+    }
+
+    /*
+     * 編集可能フィールド（文字列・数値）の背景枠。Blockly コアCSSには
+     * fill 指定が無く、本来はレンダラ/テーマが属性で付与するが Shadow DOM
+     * 内では適用されず SVG 既定色（黒）になり「黒地に黒文字」で読めなくなる。
+     * 白背景・濃色文字を明示して可読性を確保する。
+     */
+    .mount .blocklyFieldRect {
+      fill: #ffffff;
+    }
+    .mount text.blocklyText {
+      fill: #1a1a1a;
+    }
+
+    /* shadow ブロック（見本）: 薄く点線表示・フィールド操作不可 */
+    .mount .blocklyShadow > .blocklyPath {
+      opacity: 0.35;
+      stroke-dasharray: 4 3;
+    }
+    .mount .blocklyShadow .blocklyEditableText,
+    .mount .blocklyShadow .blocklyDropdownText,
+    .mount .blocklyShadow .blocklyTextInput {
+      pointer-events: none;
     }
 
     .footer {
@@ -290,6 +410,12 @@ export class FormulaBuilder extends LitElement {
       padding: 6px 8px;
       border-radius: 4px;
       color: #111827;
+    }
+
+    .preview-warn {
+      font-size: 11px;
+      color: #b45309;
+      line-height: 1.4;
     }
 
     .actions {

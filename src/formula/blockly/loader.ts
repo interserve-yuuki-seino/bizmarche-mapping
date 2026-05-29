@@ -2,9 +2,12 @@ import * as Blockly from 'blockly'
 import type { ConditionExpr, FormulaExpr } from '../ast'
 import { isCallExpr, isConditionExpr, isFieldExpr, isLiteralExpr } from '../ast'
 import { parseFormula, tryParseFormula } from '../parser'
-import { FORMULA_BLOCK_TYPES } from './blocks'
+import {
+  FORMULA_BLOCK_TYPES,
+  setBlockFieldDropdown,
+  setWorkspaceFieldNames,
+} from './blocks'
 import { collectFieldNamesFromAst, mergeFieldNames } from './collect-fields'
-import { setWorkspaceFieldNames } from './blocks'
 
 function quoteString(s: string): string {
   return `'${s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
@@ -21,18 +24,25 @@ function renderBlock(block: Blockly.Block): void {
   svg.render()
 }
 
+function countTopBlocks(workspace: Blockly.Workspace): number {
+  return workspace.getTopBlocks(false).filter((b) => !b.isInFlyout).length
+}
+
 /** 値ブロックを作成 */
 function createValueBlock(
   workspace: Blockly.Workspace,
   expr: FormulaExpr,
-  xy?: { x: number; y: number },
 ): Blockly.BlockSvg {
   let block: Blockly.Block
 
   if (isFieldExpr(expr)) {
     block = workspace.newBlock(FORMULA_BLOCK_TYPES.FIELD_REF)
-    block.setFieldValue(expr.name, 'FIELD')
-  } else if (isLiteralExpr(expr)) {
+    renderBlock(asSvg(block))
+    setBlockFieldDropdown(block, expr.name)
+    return asSvg(block)
+  }
+
+  if (isLiteralExpr(expr)) {
     if (typeof expr.value === 'number') {
       block = workspace.newBlock(FORMULA_BLOCK_TYPES.LITERAL_NUMBER)
       block.setFieldValue(expr.value, 'NUM')
@@ -40,16 +50,19 @@ function createValueBlock(
       block = workspace.newBlock(FORMULA_BLOCK_TYPES.LITERAL_STRING)
       block.setFieldValue(expr.value, 'TEXT')
     }
-  } else if (isCallExpr(expr)) {
-    return createCallBlock(workspace, expr)
-  } else {
-    block = workspace.newBlock(FORMULA_BLOCK_TYPES.LITERAL_STRING)
-    block.setFieldValue('', 'TEXT')
+    const svg = asSvg(block)
+    renderBlock(svg)
+    return svg
   }
 
+  if (isCallExpr(expr)) {
+    return createCallBlock(workspace, expr)
+  }
+
+  block = workspace.newBlock(FORMULA_BLOCK_TYPES.LITERAL_STRING)
+  block.setFieldValue('', 'TEXT')
   const svg = asSvg(block)
   renderBlock(svg)
-  if (xy) svg.moveBy(xy.x, xy.y)
   return svg
 }
 
@@ -61,7 +74,8 @@ function createConditionBlock(
 
   if (cond.op === '==') {
     block = workspace.newBlock(FORMULA_BLOCK_TYPES.CONDITION_EQ)
-    block.setFieldValue(cond.field, 'FIELD')
+    renderBlock(asSvg(block))
+    setBlockFieldDropdown(block, cond.field)
     const rhs = createValueBlock(workspace, {
       type: 'literal',
       value: cond.operand as string | number,
@@ -69,14 +83,13 @@ function createConditionBlock(
     block.getInput('RHS')!.connection!.connect(rhs.outputConnection!)
   } else {
     block = workspace.newBlock(FORMULA_BLOCK_TYPES.CONDITION_IN)
-    block.setFieldValue(cond.field, 'FIELD')
+    renderBlock(asSvg(block))
+    setBlockFieldDropdown(block, cond.field)
     const list = (cond.operand as string[]).map(quoteString).join(',')
     block.setFieldValue(list, 'LIST')
   }
 
-  const svg = asSvg(block)
-  renderBlock(svg)
-  return svg
+  return asSvg(block)
 }
 
 function createCallBlock(
@@ -85,6 +98,8 @@ function createCallBlock(
 ): Blockly.BlockSvg {
   if (expr.name === 'iif' && expr.args.length >= 3) {
     const block = workspace.newBlock(FORMULA_BLOCK_TYPES.IIF)
+    renderBlock(asSvg(block))
+
     const condArg = expr.args[0]
     if (isConditionExpr(condArg)) {
       const condBlock = createConditionBlock(workspace, condArg)
@@ -94,13 +109,13 @@ function createCallBlock(
     const falseBlock = createValueBlock(workspace, expr.args[2]!)
     block.getInput('TRUE')!.connection!.connect(trueBlock.outputConnection!)
     block.getInput('FALSE')!.connection!.connect(falseBlock.outputConnection!)
-    const svg = asSvg(block)
-    renderBlock(svg)
-    return svg
+    return asSvg(block)
   }
 
   if (expr.name === 'expandNo') {
     const block = workspace.newBlock(FORMULA_BLOCK_TYPES.EXPAND_NO)
+    renderBlock(asSvg(block))
+
     const names = ['ARG0', 'ARG1', 'ARG2'] as const
     for (let i = 0; i < names.length; i++) {
       const arg = expr.args[i]
@@ -108,9 +123,7 @@ function createCallBlock(
       const child = createValueBlock(workspace, arg)
       block.getInput(names[i]!)!.connection!.connect(child.outputConnection!)
     }
-    const svg = asSvg(block)
-    renderBlock(svg)
-    return svg
+    return asSvg(block)
   }
 
   const fallback = workspace.newBlock(FORMULA_BLOCK_TYPES.LITERAL_STRING)
@@ -130,7 +143,7 @@ export function loadFormulaAst(
   setWorkspaceFieldNames(workspace, merged)
   workspace.clear()
   setWorkspaceFieldNames(workspace, merged)
-  createValueBlock(workspace, expr, { x: 24, y: 24 })
+  createValueBlock(workspace, expr)
 }
 
 /** formula 文字列をパースして Blockly に復元 */
@@ -155,6 +168,9 @@ export function loadFormulaString(
 
   try {
     loadFormulaAst(workspace, ast, fieldNames)
+    if (countTopBlocks(workspace) === 0) {
+      return { ok: false, error: 'ブロックの復元に失敗しました。' }
+    }
     return { ok: true }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
