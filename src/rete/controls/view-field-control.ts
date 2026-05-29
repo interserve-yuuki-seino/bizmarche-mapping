@@ -36,17 +36,24 @@ export class ViewFieldControl extends LitElement {
 
   @state() private _fieldName = ''
   @state() private _formula = ''
+  /** 現在フォーカス中のフィールド（編集中は外部 props からの同期を抑止） */
+  @state() private _focusedField: 'fieldName' | 'formula' | null = null
 
   /** 外部からプロパティが変わったとき入力表示を同期 */
   override willUpdate(changed: PropertyValues<this>): void {
-    if (
-      changed.has('fieldName') ||
-      changed.has('formula') ||
-      changed.has('syncRevision')
-    ) {
-      this._fieldName = this.fieldName
-      this._formula = this.formula
+    const fieldChanged =
+      changed.has('fieldName') || changed.has('formula') || changed.has('syncRevision')
+    if (!fieldChanged) return
+
+    if (this._focusedField === 'fieldName' && changed.has('fieldName')) {
+      return
     }
+    if (this._focusedField === 'formula' && changed.has('formula')) {
+      return
+    }
+
+    this._fieldName = this.fieldName
+    this._formula = this.formula
   }
 
   override connectedCallback(): void {
@@ -83,11 +90,19 @@ export class ViewFieldControl extends LitElement {
             @input=${(e: Event) => {
               const v = (e.target as HTMLInputElement).value
               this._fieldName = v
-              this.onPatch({
-                id: this.viewFieldId,
-                fieldName: v,
-                overrideFieldName: true,
-              })
+            }}
+            @focus=${() => {
+              this._focusedField = 'fieldName'
+            }}
+            @blur=${() => {
+              this._focusedField = null
+              if (this._fieldName !== this.fieldName || this.overrideFieldName) {
+                this.onPatch({
+                  id: this.viewFieldId,
+                  fieldName: this._fieldName,
+                  overrideFieldName: true,
+                })
+              }
             }}
             placeholder="出力項目名"
           />
@@ -101,7 +116,15 @@ export class ViewFieldControl extends LitElement {
               @input=${(e: Event) => {
                 const v = (e.target as HTMLInputElement).value
                 this._formula = v
-                this.onPatch({ id: this.viewFieldId, formula: v })
+              }}
+              @focus=${() => {
+                this._focusedField = 'formula'
+              }}
+              @blur=${() => {
+                this._focusedField = null
+                if (this._formula !== this.formula) {
+                  this.onPatch({ id: this.viewFieldId, formula: this._formula })
+                }
               }}
               placeholder="entity フィールド名または式"
             />

@@ -1,5 +1,6 @@
 import { LitElement, css, html, type PropertyValues } from 'lit'
 import { customElement, property, state } from 'lit/decorators.js'
+import { guard } from 'lit/directives/guard.js'
 import { apiConfig } from './api/config'
 import {
   createMappingEditor,
@@ -421,12 +422,14 @@ export class BizmarcheConverterMapping extends LitElement {
               ${this.converterError
                 ? html`<div class="inline-error">${this.converterError}</div>`
                 : null}
-              ${this.converterResultJson
-                ? html`
-                    <div class="panel-title sub">変換結果</div>
-                    <pre class="json-preview">${this.converterResultJson}</pre>
-                  `
-                : null}
+              ${guard([this.converterResultJson], () =>
+                this.converterResultJson
+                  ? html`
+                      <div class="panel-title sub">変換結果</div>
+                      <pre class="json-preview">${this.converterResultJson}</pre>
+                    `
+                  : null,
+              )}
             </section>
           </aside>
         </div>
@@ -774,7 +777,8 @@ export class BizmarcheConverterMapping extends LitElement {
       n.id === patch.id ? { ...n, ...patch } : n,
     )
     this.rebuildQueryJson()
-    // 入力中は control を差し替えない（フォーカス維持）
+    // ViewField の値変更は blur/確定時にのみ親へ反映されるため、
+    // formula 更新時のみ Rete 側へ同期する（この関数自体の頻度も落ちる）。
     if (patch.formula !== undefined) {
       void this.syncViewFieldFormulaToEditor(patch.id)
     }
